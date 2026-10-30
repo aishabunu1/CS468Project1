@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Speed test</title>
+<style>
+  :root { --bg:#eef2f4; --ink:#14232b; --mute:#5d6f78; --line:#cbd6db; --accent:#0a7c86; --panel:#fff; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#10191e; --ink:#e6eef1; --mute:#8fa3ad; --line:#273841; --accent:#3cc3cf; --panel:#17232a; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 "Segoe UI", system-ui, sans-serif; display:flex; justify-content:center; padding:40px 16px; }
+  main { width:100%; max-width:640px; }
+  h1 { font-size:1.4rem; font-weight:600; margin:0 0 4px; }
+  p.sub { color:var(--mute); margin:0 0 28px; }
+  .stage { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:20px 24px; margin-bottom:12px; display:grid; grid-template-columns:1fr auto; gap:2px 16px; align-items:baseline; }
+  .stage.active { border-color:var(--accent); box-shadow:inset 4px 0 0 var(--accent); }
+  .name { font-weight:600; }
+  .value { font-size:2.4rem; font-weight:300; font-variant-numeric:tabular-nums; text-align:right; }
+  .value small { font-size:.95rem; color:var(--mute); margin-left:4px; }
+  .detail { grid-column:1 / -1; color:var(--mute); font-size:.9rem; min-height:1.4em; }
+  button { font:inherit; font-weight:600; background:var(--accent); color:#fff; border:0; border-radius:6px; padding:12px 32px; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:wait; }
+  button:focus-visible { outline:3px solid var(--ink); outline-offset:2px; }
+  #status { margin-left:16px; color:var(--mute); }
+  #total { margin-top:20px; color:var(--mute); font-size:.9rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Speed test</h1>
+  <p class="sub">Measures latency, download and upload between this browser and this server.</p>
+
+  <div class="stage" id="s-ping"><span class="name">Ping</span><span class="value" id="v-ping">–<small>ms</small></span><span class="detail" id="d-ping"></span></div>
+  <div class="stage" id="s-down"><span class="name">Download</span><span class="value" id="v-down">–<small>Mbps</small></span><span class="detail" id="d-down"></span></div>
+  <div class="stage" id="s-up"><span class="name">Upload</span><span class="value" id="v-up">–<small>Mbps</small></span><span class="detail" id="d-up"></span></div>
+
+  <button id="start">Start test</button><span id="status" role="status"></span>
+  <div id="total"></div>
+</main>
+
+<script>
+'use strict';
+// ---------- Tunable parameters ----------
+const PING_COUNT   = 11;      // first sample is discarded (it includes TCP connection setup)
+const STREAMS      = 4;       // parallel connections, so one TCP window does not cap the result
+const WARMUP_MS    = 1000;    // TCP slow-start period, excluded from the final result
+const MIN_MS       = 3000;    // do not stop before this
+const MAX_MS       = 10000;   // hard limit per phase
+const STABLE_PCT   = 0.05;    // stop when two consecutive 1-second windows differ by less than 5%
+const UPLOAD_BLOB  = 4 * 1024 * 1024;
+
+const $ = id => document.getElementById(id);
+const MB = bytes => (bytes / 1e6).toFixed(2) + ' MB';
+
+// Bytes -> megabits per second (decimal, same convention as other speed-test tools)
+const mbps = (bytes, ms) => (bytes * 8) / 1e6 / (ms / 1000);
+
+// ---------- Ping ----------
+async function measurePing() {
+  const rtts = [];
+  for (let i = 0; i < PING_COUNT; i++) {
+    const t0 = performance.now();
+    const r = await fetch('/ping?r=' + Math.random(), { cache: 'no-store' });
+    await r.arrayBuffer();
+    rtts.push(performance.now() - t0);
+    if (i > 0) $('v-ping').firstChild.nodeValue = rtts[i].toFixed(0);
+  }
+  rtts.shift();
+  const sorted = [...rtts].sort((a, b) => a - b);
+  const median = sorted[sorted.length >> 1];
+  let jitter = 0;
+  for (let i = 1; i < rtts.length; i++) jitter += Math.abs(rtts[i] - rtts[i - 1]);
+  jitter /= rtts.length - 1;
+  const bytes = PING_COUNT * 300; // rough size of one small request + response with headers
+  return { median, jitter, min: sorted[0], bytes };
+}
+
+// ---------- Generic throughput phase ----------
+// start() begins the transfers, getBytes() returns total bytes so far, stop() ends them.
+// The phase ends as soon as the speed is stable, so little data is used on slow and fast links alike.
+function runPhase({ start, getBytes, stop, onLive }) {
+  return new Promise(resolve => {
+    const t0 = performance.now();
+    const samples = [];
+    // speed over the last `w` ms, optionally shifted back by `shift` ms
+    const windowSpeed = (w, shift = 0) => {
+      const end = samples[samples.length - 1].t - shift, begin = end - w;
+      const a = samples.find(s => s.t >= begin), b = [...samples].reverse().find(s => s.t <= end);
+      return a && b && b.t > a.t ? mbps(b.b - a.b, b.t - a.t) : 0;
+    };
+    start();
+    const timer = setInterval(() => {
+      const t = performance.now() - t0;
+      samples.push({ t, b: getBytes() });
+      onLive(windowSpeed(1000));
+      let done = t >= MAX_MS;
+      if (!done && t >= MIN_MS) {
+        const cur = windowSpeed(1000), prev = windowSpeed(1000, 1000);
+        done = prev > 0 && Math.abs(cur - prev) / prev < STABLE_PCT;
+      }
+      if (done) {
+        clearInterval(timer); stop();
+        const first = samples.find(s => s.t >= WARMUP_MS) || samples[0];
+        const last = samples[samples.length - 1];
+        resolve({ speed: mbps(last.b - first.b, last.t - first.t), bytes: last.b, ms: last.t });
+      }
+    }, 100);
+  });
+}
+
+// ---------- Download ----------
+function measureDownload() {
+  let bytes = 0, stopped = false;
+  const controllers = [];
+  async function stream() {
+    while (!stopped) {                       // restart if a very fast link finishes a request
+      const c = new AbortController(); controllers.push(c);
+      try {
+        const r = await fetch('/download?bytes=104857600&r=' + Math.random(), { signal: c.signal, cache: 'no-store' });
+        const reader = r.body.getReader();
+        for (;;) { const { done, value } = await reader.read(); if (done) break; bytes += value.length; }
+      } catch (e) { /* aborted when the phase ends */ }
+    }
+  }
+  return runPhase({
+    start: () => { for (let i = 0; i < STREAMS; i++) stream(); },
+    getBytes: () => bytes,
+    stop: () => { stopped = true; controllers.forEach(c => c.abort()); },
+    onLive: s => { $('v-down').firstChild.nodeValue = s.toFixed(1); $('d-down').textContent = MB(bytes) + ' downloaded so far'; }
+  });
+}
+
+// ---------- Upload ----------
+function measureUpload() {
+  // Random data (not compressible); getRandomValues accepts at most 64 KB per call
+  const parts = [];
+  for (let i = 0; i < UPLOAD_BLOB / 65536; i++) parts.push(crypto.getRandomValues(new Uint8Array(65536)));
+  const blob = new Blob(parts);
+  let bytes = 0, stopped = false;
+  const requests = [];
+  function send() {
+    return new Promise(resolve => {
+      const x = new XMLHttpRequest(); requests.push(x);
+      let last = 0;
+      x.open('POST', '/upload');
+      x.upload.onprogress = e => { bytes += e.loaded - last; last = e.loaded; }; // bytes handed to the network so far
+      x.onloadend = resolve;
+      x.send(blob);
+    });
+  }
+  async function stream() { while (!stopped) await send(); }
+  return runPhase({
+    start: () => { for (let i = 0; i < STREAMS; i++) stream(); },
+    getBytes: () => bytes,
+    stop: () => { stopped = true; requests.forEach(x => x.abort()); },
+    onLive: s => { $('v-up').firstChild.nodeValue = s.toFixed(1); $('d-up').textContent = MB(bytes) + ' uploaded so far'; }
+  });
+}
+
+// ---------- UI flow ----------
+const setActive = id => ['ping', 'down', 'up'].forEach(k => $('s-' + k).classList.toggle('active', k === id));
+
+$('start').addEventListener('click', async () => {
+  const btn = $('start'); btn.disabled = true;
+  ['ping', 'down', 'up'].forEach(k => { $('v-' + k).firstChild.nodeValue = '–'; $('d-' + k).textContent = ''; });
+  $('total').textContent = '';
+  try {
+    $('status').textContent = 'Measuring ping…'; setActive('ping');
+    const p = await measurePing();
+    $('v-ping').firstChild.nodeValue = p.median.toFixed(0);
+    $('d-ping').textContent = `Jitter ${p.jitter.toFixed(1)} ms · best ${p.min.toFixed(0)} ms · ${PING_COUNT - 1} samples`;
+
+    $('status').textContent = 'Measuring download…'; setActive('down');
+    const d = await measureDownload();
+    $('v-down').firstChild.nodeValue = d.speed.toFixed(1);
+    $('d-down').textContent = `${MB(d.bytes)} downloaded in ${(d.ms / 1000).toFixed(1)} s`;
+
+    $('status').textContent = 'Measuring upload…'; setActive('up');
+    const u = await measureUpload();
+    $('v-up').firstChild.nodeValue = u.speed.toFixed(1);
+    $('d-up').textContent = `${MB(u.bytes)} uploaded in ${(u.ms / 1000).toFixed(1)} s`;
+
+    $('total').textContent = `Total data used: ${MB(d.bytes + u.bytes + p.bytes)} · total time: ${((d.ms + u.ms) / 1000).toFixed(1)} s (plus ping)`;
+    $('status').textContent = 'Done';
+  } catch (err) {
+    $('status').textContent = 'Test failed: ' + err.message + '. Check the connection and try again.';
+  }
+  setActive(null); btn.disabled = false; btn.textContent = 'Test again';
+});
+</script>
+</body>
+</html>

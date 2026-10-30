@@ -1,0 +1,1 @@
+{ "name": "speedtest", "version": "1.0.0", "description": "Ping, download and upload speed test", "main": "server.js", "scripts": { "start": "node server.js" }, "engines": { "node": ">=18" } }
