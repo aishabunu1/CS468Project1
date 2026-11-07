@@ -5,11 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Speed test</title>
 <style>
-  /* Palette: forest green page, white ink, one pastel pink for "this is live / press this". */
   :root { --cobalt:#1e6b4b; --deep:#14503a; --ink:#fff; --mute:rgba(255,255,255,.8); --rule:rgba(255,255,255,.28); --signal:#ffc4d6; --on-signal:#0f3a28; }
   * { box-sizing:border-box; }
   body { margin:0; min-height:100vh; background:var(--cobalt); color:var(--ink);
-         /* Bahnschrift ships with Windows; the rest fall back to system fonts, so nothing is downloaded. */
          font:17px/1.5 "Bahnschrift", "DIN Alternate", "Roboto Condensed", system-ui, sans-serif; }
   main { max-width:1040px; margin:0 auto; padding:48px 24px 56px; }
 
@@ -23,7 +21,6 @@
   button:focus-visible { outline:3px solid #fff; outline-offset:3px; }
   #status { color:var(--mute); min-height:1.5em; }
 
-  /* The live trace: speed over time for whichever test is running. */
   .trace { position:relative; background:var(--deep); border-radius:4px; height:240px; margin-bottom:32px; overflow:hidden; }
   .trace canvas { position:absolute; inset:0; width:100%; height:100%; display:block; }
   #trace-label { position:absolute; left:20px; top:16px; color:var(--mute); }
@@ -75,14 +72,14 @@
 
 <script>
 'use strict';
-// ---------- Tunable parameters ----------
+// parameters
 const PING_COUNT   = 11;      // first sample is discarded (it includes TCP connection setup)
-const STREAMS      = 4;       // parallel connections, so one TCP window does not cap the result
-const WARMUP_MS    = 2000;    // slow-start / initial burst period, excluded from the final result
+const STREAMS      = 4;       // parallel connections so that one TCP window does not cap the result
+const WARMUP_MS    = 2000;    // initial burst period (excluded from the final result)
 const MIN_MS       = 5000;    // do not stop before this (so the result is not just an initial burst)
 const MAX_MS       = 10000;   // hard limit per phase
-const STABLE_PCT   = 0.05;    // stop when two consecutive 1-second windows differ by less than 5%
-const UPLOAD_BLOB  = 4 * 1024 * 1024;   // size of each upload request
+const STABLE_PCT   = 0.05;    // stop when two consecutive 1 second windows differ by less than 5%
+const UPLOAD_BLOB  = 16 * 1024 * 1024;  // size of each upload request 
 const RETRY_DELAY  = 200;     // ms to wait before retrying a failed request
 const MAX_ERRORS   = 5;       // abort the phase after this many failed requests
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -90,11 +87,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const $ = id => document.getElementById(id);
 const MB = bytes => (bytes / 1e6).toFixed(2) + ' MB';
 
-// Bytes -> megabits per second (decimal, same convention as other speed-test tools)
+// convert from bytes to megabits per second 
 const mbps = (bytes, ms) => (bytes * 8) / 1e6 / (ms / 1000);
 
-// ---------- Live trace (canvas) ----------
-// Plots one value per sample for the running test: ping in ms, download/upload in Mbps.
+// plots one value per sample for the running test: ping in ms, download andupload in Mbps.
 const trace = (() => {
   const canvas = $('trace'), ctx = canvas.getContext('2d');
   let points = [];
@@ -105,10 +101,10 @@ const trace = (() => {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
     const top = 64, bottom = h - 16, left = 20, right = w - 20;
-    ctx.strokeStyle = 'rgba(255,255,255,.14)'; ctx.lineWidth = 1;     // faint guide lines
+    ctx.strokeStyle = 'rgba(255,255,255,.14)'; ctx.lineWidth = 1;     
     for (let i = 0; i < 4; i++) { const y = top + (bottom - top) * i / 3; ctx.beginPath(); ctx.moveTo(left, y); ctx.lineTo(right, y); ctx.stroke(); }
     if (points.length < 2) return;
-    const max = Math.max(...points) * 1.1 || 1;                       // auto-scale to the data
+    const max = Math.max(...points) * 1.1 || 1;                       
     const x = i => left + (right - left) * i / Math.max(points.length - 1, 1);
     const y = v => bottom - (bottom - top) * (v / max);
     ctx.beginPath(); ctx.moveTo(x(0), bottom);
@@ -117,7 +113,7 @@ const trace = (() => {
     ctx.fillStyle = 'rgba(255,255,255,.10)'; ctx.fill();
     ctx.beginPath(); points.forEach((v, i) => i ? ctx.lineTo(x(i), y(v)) : ctx.moveTo(x(i), y(v)));
     ctx.strokeStyle = '#fff'; ctx.lineWidth = 2.5; ctx.lineJoin = 'round'; ctx.stroke();
-    const i = points.length - 1;                                      // pink dot = latest sample
+    const i = points.length - 1;                                      
     ctx.beginPath(); ctx.arc(x(i), y(points[i]), 6, 0, Math.PI * 2); ctx.fillStyle = '#ffc4d6'; ctx.fill();
   }
   window.addEventListener('resize', draw);
@@ -128,10 +124,10 @@ const trace = (() => {
   };
 })();
 
-// ---------- Ping ----------
+// Ping
 async function measurePing() {
   const rtts = [];
-  performance.clearResourceTimings(); // so we only sum our own ping requests below
+  performance.clearResourceTimings(); 
   for (let i = 0; i < PING_COUNT; i++) {
     const t0 = performance.now();
     const r = await fetch('/ping?r=' + Math.random(), { cache: 'no-store' });
@@ -141,26 +137,24 @@ async function measurePing() {
   }
   rtts.shift();
   const sorted = [...rtts].sort((a, b) => a - b);
-  const median = sorted[sorted.length >> 1];
+  const mid = sorted.length >> 1;
+  const median = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
   let jitter = 0;
   for (let i = 1; i < rtts.length; i++) jitter += Math.abs(rtts[i] - rtts[i - 1]);
   jitter /= rtts.length - 1;
-  // Real bytes: transferSize (response headers + body) from the Resource Timing API.
-  // Falls back to a rough 300 B per request if the browser reports 0.
   const entries = performance.getEntriesByType('resource').filter(e => e.name.includes('/ping'));
   const measured = entries.reduce((sum, e) => sum + e.transferSize, 0);
   const bytes = measured > 0 ? measured : PING_COUNT * 300;
   return { median, jitter, min: sorted[0], bytes };
 }
 
-// ---------- Generic throughput phase ----------
+// Generic throughput phase
 // start() begins the transfers, getBytes() returns total bytes so far, stop() ends them.
 // The phase ends as soon as the speed is stable, so little data is used on slow and fast links alike.
 function runPhase({ start, getBytes, stop, onLive, getError }) {
   return new Promise((resolve, reject) => {
     const t0 = performance.now();
     const samples = [];
-    // speed over the last `w` ms, optionally shifted back by `shift` ms
     const windowSpeed = (w, shift = 0) => {
       const end = samples[samples.length - 1].t - shift, begin = end - w;
       const a = samples.find(s => s.t >= begin), b = [...samples].reverse().find(s => s.t <= end);
@@ -172,7 +166,7 @@ function runPhase({ start, getBytes, stop, onLive, getError }) {
       samples.push({ t, b: getBytes() });
       onLive(windowSpeed(1000));
       const err = getError && getError();
-      if (err) { clearInterval(timer); stop(); return reject(err); } // too many failed requests
+      if (err) { clearInterval(timer); stop(); return reject(err); } 
       let done = t >= MAX_MS;
       if (!done && t >= MIN_MS) {
         const cur = windowSpeed(1000), prev = windowSpeed(1000, 1000);
@@ -188,21 +182,21 @@ function runPhase({ start, getBytes, stop, onLive, getError }) {
   });
 }
 
-// ---------- Download ----------
+// Download
 function measureDownload() {
   let bytes = 0, stopped = false, errors = 0, failure = null;
   const controllers = [];
   async function stream() {
-    while (!stopped) {                       // restart if a very fast link finishes a request
+    while (!stopped) {                       
       const c = new AbortController(); controllers.push(c);
       try {
         const r = await fetch('/download?bytes=104857600&r=' + Math.random(), { signal: c.signal, cache: 'no-store' });
         const reader = r.body.getReader();
         for (;;) { const { done, value } = await reader.read(); if (done) break; bytes += value.length; }
       } catch (e) {
-        if (stopped) break;                  // normal: aborted when the phase ends
+        if (stopped) break;                  
         if (++errors >= MAX_ERRORS) { failure = new Error('download kept failing'); break; }
-        await sleep(RETRY_DELAY);            // back off instead of hammering the server
+        await sleep(RETRY_DELAY);            
       }
     }
   }
@@ -215,10 +209,9 @@ function measureDownload() {
   });
 }
 
-// ---------- Upload ----------
+// Upload
 async function measureUpload() {
-  const testId = Math.random().toString(36).slice(2); // lets the server group all requests of this test
-  // Random data (not compressible); getRandomValues accepts at most 64 KB per call
+  const testId = Math.random().toString(36).slice(2); 
   const parts = [];
   for (let i = 0; i < UPLOAD_BLOB / 65536; i++) parts.push(crypto.getRandomValues(new Uint8Array(65536)));
   const blob = new Blob(parts);
@@ -229,9 +222,9 @@ async function measureUpload() {
       const x = new XMLHttpRequest(); requests.push(x);
       let last = 0;
       x.open('POST', '/upload?id=' + testId);
-      x.upload.onprogress = e => { bytes += e.loaded - last; last = e.loaded; }; // bytes handed to the network so far
+      x.upload.onprogress = e => { bytes += e.loaded - last; last = e.loaded; }; 
       x.onloadend = () => {
-        if (!stopped && x.status !== 200) errors++; // network error or bad reply (not our own abort)
+        if (!stopped && x.status !== 200) errors++;
         resolve();
       };
       x.send(blob);
@@ -264,11 +257,11 @@ async function measureUpload() {
     if (s.length > 1 && last[0] > first[0]) {
       return { speed: mbps(last[1] - first[1], last[0] - first[0]), bytes: stats.total, ms: result.ms, browserSpeed: result.speed };
     }
-  } catch (e) { /* server numbers unavailable: fall back to the browser's own count below */ }
+  } catch (e) {  }
   return { ...result, browserSpeed: result.speed };
 }
 
-// ---------- UI flow ----------
+// UI flow
 const setActive = id => ['ping', 'down', 'up'].forEach(k => $('s-' + k).classList.toggle('active', k === id));
 
 $('start').addEventListener('click', async () => {
